@@ -4,10 +4,17 @@ import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { isRedirectError } from "next/dist/client/components/redirect";
 import { z } from "zod";
-import { requireMemberOrganizationProfile } from "@/lib/auth";
+import { requireWorkingOrganizationProfile } from "@/lib/auth";
+import { getEmployeeTaskAssignerRecords, ensureRecurringTasksForOrganization } from "@/lib/data";
+import {
+  canAssignToEmployee,
+  canManageRecurringRule,
+  canManageTask,
+  canToggleTask
+} from "@/lib/permissions";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
+import type { ProfileRecord } from "@/lib/types";
 import { parseWeekdays } from "@/lib/utils";
-import { ensureRecurringTasksForOrganization } from "@/lib/data";
 
 const taskSchema = z.object({
   title: z.string().min(1, "Title is required"),
@@ -53,12 +60,82 @@ function rethrowIfRedirect(error: unknown) {
   }
 }
 
+async function getWorkingMembersForOrganization(organizationId: string) {
+  const supabase = createSupabaseServerClient();
+  const { data, error } = await supabase
+    .from("profiles")
+    .select("id, organization_id, full_name, email, access_level, reporting_manager_id, created_at")
+    .eq("organization_id", organizationId);
+
+  if (error) {
+    throw error;
+  }
+
+  return (data ?? []) as ProfileRecord[];
+}
+
+async function assertCanAssign(
+  actor: ProfileRecord,
+  organizationId: string,
+  assignedTo: string,
+  path: string
+) {
+  const [members, assignerLinks] = await Promise.all([
+    getWorkingMembersForOrganization(organizationId),
+    getEmployeeTaskAssignerRecords(organizationId)
+  ]);
+  const targetMember = members.find((member) => member.id === assignedTo);
+
+  if (!targetMember || !canAssignToEmployee(actor, targetMember, assignerLinks)) {
+    bounce(path, "You do not have permission to assign tasks to that employee.");
+  }
+
+  return { members, assignerLinks, targetMember };
+}
+
+async function getTaskForPermissionCheck(taskId: string, organizationId: string) {
+  const supabase = createSupabaseServerClient();
+  const { data, error } = await supabase
+    .from("tasks")
+    .select(
+      "id, organization_id, title, description, assigned_to, created_by, due_date, due_time, status, completed_at, created_at, recurrence_rule_id, recurrence_instance_date, assigned_profile:profiles!tasks_assigned_to_fkey(full_name, email, reporting_manager_id, access_level)"
+    )
+    .eq("id", taskId)
+    .eq("organization_id", organizationId)
+    .maybeSingle();
+
+  if (error) {
+    throw error;
+  }
+
+  return data;
+}
+
+async function getRecurringRuleForPermissionCheck(ruleId: string, organizationId: string) {
+  const supabase = createSupabaseServerClient();
+  const { data, error } = await supabase
+    .from("recurrence_rules")
+    .select(
+      "id, organization_id, title, description, assigned_to, created_by, start_date, end_date, due_time, frequency, interval_value, weekdays, is_active, assigned_profile:profiles!recurrence_rules_assigned_to_fkey(full_name, email, reporting_manager_id, access_level)"
+    )
+    .eq("id", ruleId)
+    .eq("organization_id", organizationId)
+    .maybeSingle();
+
+  if (error) {
+    throw error;
+  }
+
+  return data;
+}
+
 export async function createTaskAction(formData: FormData) {
-  const profile = await requireMemberOrganizationProfile();
+  const profile = await requireWorkingOrganizationProfile();
   const supabase = createSupabaseServerClient();
 
   try {
     const values = toTaskValues(formData);
+    await assertCanAssign(profile, profile.organization_id!, values.assignedTo, "/tasks");
 
     const duplicateWindowStart = new Date(Date.now() - 30_000).toISOString();
     let duplicateQuery = supabase
@@ -109,7 +186,7 @@ export async function createTaskAction(formData: FormData) {
 }
 
 export async function quickAddTaskAction(formData: FormData) {
-  const profile = await requireMemberOrganizationProfile();
+  const profile = await requireWorkingOrganizationProfile();
   const supabase = createSupabaseServerClient();
   const title = String(formData.get("title") ?? "").trim();
   const dueTime = normalizeOptionalTime(formData.get("dueTime")) ?? null;
@@ -136,12 +213,20 @@ export async function quickAddTaskAction(formData: FormData) {
 }
 
 export async function updateTaskAction(formData: FormData) {
-  const profile = await requireMemberOrganizationProfile();
+  const profile = await requireWorkingOrganizationProfile();
   const supabase = createSupabaseServerClient();
   const taskId = String(formData.get("taskId") ?? "");
 
   try {
     const values = toTaskValues(formData);
+    const task = await getTaskForPermissionCheck(taskId, profile.organization_id!);
+
+    if (!task || !canManageTask(profile, task, task.assigned_profile?.[0] ?? task.assigned_profile ?? null)) {
+      bounce("/tasks", "You do not have permission to edit that task.");
+    }
+
+    await assertCanAssign(profile, profile.organization_id!, values.assignedTo, "/tasks");
+
     const { error } = await supabase
       .from("tasks")
       .update({
@@ -167,9 +252,15 @@ export async function updateTaskAction(formData: FormData) {
 }
 
 export async function deleteTaskAction(formData: FormData) {
-  const profile = await requireMemberOrganizationProfile();
+  const profile = await requireWorkingOrganizationProfile();
   const taskId = String(formData.get("taskId") ?? "");
   const supabase = createSupabaseServerClient();
+
+  const task = await getTaskForPermissionCheck(taskId, profile.organization_id!);
+
+  if (!task || !canManageTask(profile, task, task.assigned_profile?.[0] ?? task.assigned_profile ?? null)) {
+    bounce("/tasks", "You do not have permission to delete that task.");
+  }
 
   const { error } = await supabase
     .from("tasks")
@@ -186,10 +277,16 @@ export async function deleteTaskAction(formData: FormData) {
 }
 
 export async function toggleTaskCompletionAction(formData: FormData) {
-  const profile = await requireMemberOrganizationProfile();
+  const profile = await requireWorkingOrganizationProfile();
   const taskId = String(formData.get("taskId") ?? "");
   const checked = String(formData.get("checked") ?? "") === "true";
   const supabase = createSupabaseServerClient();
+
+  const task = await getTaskForPermissionCheck(taskId, profile.organization_id!);
+
+  if (!task || !canToggleTask(profile, task, task.assigned_profile?.[0] ?? task.assigned_profile ?? null)) {
+    bounce("/dashboard", "You do not have permission to update that task.");
+  }
 
   const { error } = await supabase
     .from("tasks")
@@ -209,7 +306,7 @@ export async function toggleTaskCompletionAction(formData: FormData) {
 }
 
 export async function createRecurringTaskAction(formData: FormData) {
-  const profile = await requireMemberOrganizationProfile();
+  const profile = await requireWorkingOrganizationProfile();
   const supabase = createSupabaseServerClient();
 
   try {
@@ -227,6 +324,8 @@ export async function createRecurringTaskAction(formData: FormData) {
     const intervalValue = Math.max(Number(formData.get("intervalValue") ?? 1), 1);
     const endDate = String(formData.get("endDate") ?? "").trim() || null;
     const weekdays = formData.getAll("weekdays");
+
+    await assertCanAssign(profile, profile.organization_id!, values.assignedTo, "/tasks");
 
     if (frequency === "weekly" && weekdays.length === 0) {
       bounce("/tasks", "Select at least one weekday for weekly recurrence");
@@ -261,13 +360,19 @@ export async function createRecurringTaskAction(formData: FormData) {
 }
 
 export async function deleteRecurringTaskAction(formData: FormData) {
-  const profile = await requireMemberOrganizationProfile();
+  const profile = await requireWorkingOrganizationProfile();
   const recurrenceRuleId = String(formData.get("recurrenceRuleId") ?? "");
   const deleteMode = String(formData.get("deleteMode") ?? "future");
   const supabase = createSupabaseServerClient();
 
   if (!recurrenceRuleId) {
     bounce("/tasks", "Recurring rule id is required");
+  }
+
+  const rule = await getRecurringRuleForPermissionCheck(recurrenceRuleId, profile.organization_id!);
+
+  if (!rule || !canManageRecurringRule(profile, rule, rule.assigned_profile?.[0] ?? rule.assigned_profile ?? null)) {
+    bounce("/tasks", "You do not have permission to delete that recurring rule.");
   }
 
   if (deleteMode === "all") {

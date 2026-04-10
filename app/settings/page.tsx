@@ -1,9 +1,18 @@
-import { createInvitationAction, createOrganizationAction } from "@/app/actions/organizations";
+import {
+  createInvitationAction,
+  createOrganizationAction,
+  updateEmployeeAccessAction
+} from "@/app/actions/organizations";
 import { PageHeader } from "@/components/page-header";
 import { ProtectedPage } from "@/components/protected-page";
 import { SubmitButton } from "@/components/submit-button";
-import { requireMemberOrganizationProfile, requireProfile } from "@/lib/auth";
-import { getActiveInvitations, getOrganizationContext, getOrganizationMembers } from "@/lib/data";
+import { requireAdminOrganizationProfile, requireProfile } from "@/lib/auth";
+import {
+  getActiveInvitations,
+  getEmployeeTaskAssignerRecords,
+  getOrganizationContext,
+  getOrganizationMembers
+} from "@/lib/data";
 
 export default async function SettingsPage({
   searchParams
@@ -50,13 +59,15 @@ export default async function SettingsPage({
     );
   }
 
-  await requireMemberOrganizationProfile();
+  await requireAdminOrganizationProfile();
 
-  const [members, invitations] = await Promise.all([
+  const [members, invitations, assignerLinks] = await Promise.all([
     getOrganizationMembers(context.organization.id, { includeViewers: true }),
-    getActiveInvitations(context.organization.id)
+    getActiveInvitations(context.organization.id),
+    getEmployeeTaskAssignerRecords(context.organization.id)
   ]);
   const baseUrl = process.env.NEXT_PUBLIC_SITE_URL || "http://localhost:3000";
+  const workingMembers = members.filter((member) => member.access_level !== "summary_viewer");
 
   return (
     <ProtectedPage currentPath="/settings">
@@ -74,6 +85,11 @@ export default async function SettingsPage({
         {searchParams.invite || searchParams.success === "invite-created" ? (
           <p className="rounded-2xl border border-pine/20 bg-pine/10 px-4 py-3 text-sm text-pine">
             Invite created successfully.
+          </p>
+        ) : null}
+        {searchParams.success === "employee-updated" ? (
+          <p className="rounded-2xl border border-pine/20 bg-pine/10 px-4 py-3 text-sm text-pine">
+            Employee access updated successfully.
           </p>
         ) : null}
 
@@ -109,8 +125,9 @@ export default async function SettingsPage({
                 </div>
                 <div>
                   <label className="mb-1.5 block text-sm font-medium text-ink">Invite type</label>
-                  <select name="inviteType" defaultValue="member">
-                    <option value="member">Employee access</option>
+                  <select name="inviteType" defaultValue="employee">
+                    <option value="employee">Employee access</option>
+                    <option value="admin">Admin access</option>
                     <option value="summary_viewer">Summary viewer only</option>
                   </select>
                 </div>
@@ -122,31 +139,100 @@ export default async function SettingsPage({
           <div className="space-y-6">
             <div className="card px-5 py-5">
               <h2 className="section-title">Employees</h2>
-              <div className="mt-4 overflow-x-auto">
-                <table className="min-w-full text-left text-sm">
-                  <thead className="text-white/50">
-                    <tr>
-                      <th className="pb-3 pr-4 font-medium">Name</th>
-                      <th className="pb-3 pr-4 font-medium">Email</th>
-                      <th className="pb-3 pr-4 font-medium">Access</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {members.map((member) => (
-                      <tr key={member.id} className="border-t border-sand/70">
-                        <td className="py-3 pr-4 font-medium text-white">
-                          {member.full_name || "Unnamed user"}
-                        </td>
-                        <td className="py-3 pr-4 text-white/62">{member.email}</td>
-                        <td className="py-3 pr-4 text-white/62">
-                          {member.access_level === "summary_viewer"
-                            ? "Summary viewer"
-                            : "Employee"}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+              <div className="mt-4 space-y-4">
+                {members.map((member) => {
+                  if (member.access_level === "summary_viewer") {
+                    return (
+                      <div key={member.id} className="rounded-2xl border border-sand bg-[#131a22] px-4 py-4">
+                        <div className="flex items-center justify-between gap-3">
+                          <div>
+                            <p className="font-medium text-white">{member.full_name || "Unnamed user"}</p>
+                            <p className="mt-1 text-sm text-white/58">{member.email}</p>
+                          </div>
+                          <span className="rounded-full border border-sand bg-[#0d131a] px-3 py-1 text-xs font-medium text-white/70">
+                            Summary viewer
+                          </span>
+                        </div>
+                      </div>
+                    );
+                  }
+
+                  const memberAssigners = assignerLinks
+                    .filter((link) => link.employee_id === member.id)
+                    .map((link) => link.assigner_id);
+
+                  return (
+                    <form
+                      key={member.id}
+                      action={updateEmployeeAccessAction}
+                      className="rounded-2xl border border-sand bg-[#131a22] px-4 py-4"
+                    >
+                      <input type="hidden" name="memberId" value={member.id} />
+                      <div className="flex flex-col gap-2 md:flex-row md:items-start md:justify-between">
+                        <div>
+                          <p className="font-medium text-white">{member.full_name || "Unnamed user"}</p>
+                          <p className="mt-1 text-sm text-white/58">{member.email}</p>
+                        </div>
+                        <span className="rounded-full border border-pine/20 bg-pine/10 px-3 py-1 text-xs font-medium text-pine">
+                          {member.access_level === "admin" ? "Admin" : "Employee"}
+                        </span>
+                      </div>
+
+                      <div className="mt-4 grid gap-4 md:grid-cols-2">
+                        <div>
+                          <label className="mb-1.5 block text-sm font-medium text-ink">Role</label>
+                          <select name="accessLevel" defaultValue={member.access_level ?? "employee"}>
+                            <option value="employee">Employee</option>
+                            <option value="admin">Admin</option>
+                          </select>
+                        </div>
+                        <div>
+                          <label className="mb-1.5 block text-sm font-medium text-ink">Reporting manager</label>
+                          <select
+                            name="reportingManagerId"
+                            defaultValue={member.reporting_manager_id ?? ""}
+                          >
+                            <option value="">No manager</option>
+                            {workingMembers
+                              .filter((candidate) => candidate.id !== member.id)
+                              .map((candidate) => (
+                                <option key={candidate.id} value={candidate.id}>
+                                  {candidate.full_name || candidate.email}
+                                </option>
+                              ))}
+                          </select>
+                        </div>
+                      </div>
+
+                      <div className="mt-4">
+                        <label className="mb-2 block text-sm font-medium text-ink">
+                          Who can assign tasks to this employee
+                        </label>
+                        <div className="grid gap-2 md:grid-cols-2">
+                          {workingMembers.map((candidate) => (
+                            <label
+                              key={`${member.id}-${candidate.id}`}
+                              className="inline-flex items-center gap-2 rounded-2xl border border-sand bg-[#0d131a] px-3 py-2 text-sm text-white/75"
+                            >
+                              <input
+                                type="checkbox"
+                                name="assignerIds"
+                                value={candidate.id}
+                                defaultChecked={memberAssigners.includes(candidate.id)}
+                                className="h-4 w-4 rounded border-sand"
+                              />
+                              <span>{candidate.full_name || candidate.email}</span>
+                            </label>
+                          ))}
+                        </div>
+                      </div>
+
+                      <div className="mt-4 flex justify-end">
+                        <SubmitButton pendingLabel="Saving access...">Save employee access</SubmitButton>
+                      </div>
+                    </form>
+                  );
+                })}
               </div>
             </div>
 
@@ -164,7 +250,9 @@ export default async function SettingsPage({
                         <p className="mt-1 text-xs text-pine">
                           {invite.invite_type === "summary_viewer"
                             ? "Summary viewer"
-                            : "Employee access"}
+                            : invite.invite_type === "admin"
+                              ? "Admin access"
+                              : "Employee access"}
                         </p>
                         <p className="mt-2 break-all text-sm text-white/60">{inviteUrl}</p>
                         <p className="mt-2 text-xs text-white/45">

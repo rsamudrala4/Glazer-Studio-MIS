@@ -1,5 +1,5 @@
 -- Team Task Manager schema
--- Run this in the Supabase SQL editor for a fresh project.
+-- Run this in the Supabase SQL editor for a fresh project or to upgrade an existing one.
 
 create extension if not exists "pgcrypto";
 
@@ -15,25 +15,43 @@ create table if not exists public.profiles (
   organization_id uuid references public.organizations (id) on delete set null,
   full_name text,
   email text not null unique,
-  access_level text not null default 'member' check (access_level in ('member', 'summary_viewer')),
+  access_level text not null default 'employee',
+  reporting_manager_id uuid,
   created_at timestamptz not null default timezone('utc', now())
 );
 
 alter table public.profiles
-  add column if not exists access_level text not null default 'member';
+  add column if not exists access_level text not null default 'employee';
+
+alter table public.profiles
+  add column if not exists reporting_manager_id uuid;
 
 alter table public.profiles
   drop constraint if exists profiles_access_level_check;
 
+update public.profiles
+set access_level = 'employee'
+where access_level = 'member';
+
+alter table public.profiles
+  alter column access_level set default 'employee';
+
 alter table public.profiles
   add constraint profiles_access_level_check
-  check (access_level in ('member', 'summary_viewer'));
+  check (access_level in ('admin', 'employee', 'summary_viewer'));
+
+alter table public.profiles
+  drop constraint if exists profiles_reporting_manager_id_fkey;
+
+alter table public.profiles
+  add constraint profiles_reporting_manager_id_fkey
+  foreign key (reporting_manager_id) references public.profiles (id) on delete set null;
 
 create table if not exists public.organization_invitations (
   id uuid primary key default gen_random_uuid(),
   organization_id uuid not null references public.organizations (id) on delete cascade,
   email text not null,
-  invite_type text not null default 'member' check (invite_type in ('member', 'summary_viewer')),
+  invite_type text not null default 'employee',
   invited_by uuid not null references public.profiles (id) on delete cascade,
   token text not null unique,
   accepted_at timestamptz,
@@ -42,14 +60,29 @@ create table if not exists public.organization_invitations (
 );
 
 alter table public.organization_invitations
-  add column if not exists invite_type text not null default 'member';
+  add column if not exists invite_type text not null default 'employee';
 
 alter table public.organization_invitations
   drop constraint if exists organization_invitations_invite_type_check;
 
+update public.organization_invitations
+set invite_type = 'employee'
+where invite_type = 'member';
+
+alter table public.organization_invitations
+  alter column invite_type set default 'employee';
+
 alter table public.organization_invitations
   add constraint organization_invitations_invite_type_check
-  check (invite_type in ('member', 'summary_viewer'));
+  check (invite_type in ('admin', 'employee', 'summary_viewer'));
+
+create table if not exists public.employee_task_assigners (
+  organization_id uuid not null references public.organizations (id) on delete cascade,
+  employee_id uuid not null references public.profiles (id) on delete cascade,
+  assigner_id uuid not null references public.profiles (id) on delete cascade,
+  created_at timestamptz not null default timezone('utc', now()),
+  primary key (employee_id, assigner_id)
+);
 
 create table if not exists public.recurrence_rules (
   id uuid primary key default gen_random_uuid(),
@@ -97,6 +130,9 @@ create table if not exists public.attendance_entries (
 );
 
 create index if not exists idx_profiles_organization_id on public.profiles (organization_id);
+create index if not exists idx_profiles_reporting_manager_id on public.profiles (reporting_manager_id);
+create index if not exists idx_task_assigners_org_employee on public.employee_task_assigners (organization_id, employee_id);
+create index if not exists idx_task_assigners_org_assigner on public.employee_task_assigners (organization_id, assigner_id);
 create index if not exists idx_tasks_organization_due_date on public.tasks (organization_id, due_date);
 create index if not exists idx_tasks_assigned_due_date on public.tasks (assigned_to, due_date);
 create index if not exists idx_tasks_status on public.tasks (status);
@@ -144,6 +180,190 @@ as $$
   from public.profiles
   where id = auth.uid()
 $$;
+
+create or replace function public.current_access_level()
+returns text
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select coalesce(access_level, 'employee')
+  from public.profiles
+  where id = auth.uid()
+$$;
+
+create or replace function public.is_org_admin()
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select coalesce(public.current_access_level() = 'admin', false)
+$$;
+
+create or replace function public.can_assign_employee(target_employee_id uuid)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select exists (
+    select 1
+    from public.profiles employee
+    where employee.id = target_employee_id
+      and employee.organization_id = public.current_org_id()
+      and employee.access_level <> 'summary_viewer'
+      and (
+        public.is_org_admin()
+        or employee.id = auth.uid()
+        or exists (
+          select 1
+          from public.employee_task_assigners eta
+          where eta.organization_id = employee.organization_id
+            and eta.employee_id = employee.id
+            and eta.assigner_id = auth.uid()
+        )
+      )
+  )
+$$;
+
+create or replace function public.can_manage_task(target_task_id uuid)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select exists (
+    select 1
+    from public.tasks t
+    left join public.profiles assignee on assignee.id = t.assigned_to
+    where t.id = target_task_id
+      and t.organization_id = public.current_org_id()
+      and (
+        public.is_org_admin()
+        or t.created_by = auth.uid()
+        or assignee.reporting_manager_id = auth.uid()
+      )
+  )
+$$;
+
+create or replace function public.can_manage_recurrence_rule(target_rule_id uuid)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select exists (
+    select 1
+    from public.recurrence_rules r
+    left join public.profiles assignee on assignee.id = r.assigned_to
+    where r.id = target_rule_id
+      and r.organization_id = public.current_org_id()
+      and (
+        public.is_org_admin()
+        or r.created_by = auth.uid()
+        or assignee.reporting_manager_id = auth.uid()
+      )
+  )
+$$;
+
+create or replace function public.validate_profile_update()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if auth.uid() is null then
+    raise exception 'Not authenticated';
+  end if;
+
+  if new.id = auth.uid() then
+    if old.organization_id is null then
+      return new;
+    end if;
+
+    if public.is_org_admin() then
+      return new;
+    end if;
+
+    if new.organization_id is distinct from old.organization_id
+       or new.access_level is distinct from old.access_level
+       or new.reporting_manager_id is distinct from old.reporting_manager_id then
+      raise exception 'You do not have permission to change role or reporting data';
+    end if;
+
+    return new;
+  end if;
+
+  if public.is_org_admin()
+     and old.organization_id = public.current_org_id()
+     and new.organization_id = public.current_org_id() then
+    return new;
+  end if;
+
+  raise exception 'You do not have permission to update this profile';
+end;
+$$;
+
+drop trigger if exists validate_profile_update_trigger on public.profiles;
+create trigger validate_profile_update_trigger
+  before update on public.profiles
+  for each row execute procedure public.validate_profile_update();
+
+create or replace function public.validate_task_update()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  assigned_manager_id uuid;
+begin
+  if auth.uid() is null then
+    raise exception 'Not authenticated';
+  end if;
+
+  select reporting_manager_id
+  into assigned_manager_id
+  from public.profiles
+  where id = old.assigned_to;
+
+  if public.is_org_admin() or old.created_by = auth.uid() or assigned_manager_id = auth.uid() then
+    if not public.can_assign_employee(new.assigned_to) then
+      raise exception 'You do not have permission to assign tasks to this employee';
+    end if;
+    return new;
+  end if;
+
+  if old.assigned_to = auth.uid() then
+    if new.title is distinct from old.title
+       or new.description is distinct from old.description
+       or new.assigned_to is distinct from old.assigned_to
+       or new.created_by is distinct from old.created_by
+       or new.due_date is distinct from old.due_date
+       or new.due_time is distinct from old.due_time
+       or new.recurrence_rule_id is distinct from old.recurrence_rule_id
+       or new.recurrence_instance_date is distinct from old.recurrence_instance_date
+       or new.organization_id is distinct from old.organization_id then
+      raise exception 'Assigned employees can only update task completion';
+    end if;
+    return new;
+  end if;
+
+  raise exception 'You do not have permission to update this task';
+end;
+$$;
+
+drop trigger if exists validate_task_update_trigger on public.tasks;
+create trigger validate_task_update_trigger
+  before update on public.tasks
+  for each row execute procedure public.validate_task_update();
 
 drop function if exists public.get_invitation_by_token(text);
 create or replace function public.get_invitation_by_token(invite_token text)
@@ -202,7 +422,9 @@ begin
   returning id into new_org_id;
 
   update public.profiles
-  set organization_id = new_org_id
+  set organization_id = new_org_id,
+      access_level = 'admin',
+      reporting_manager_id = null
   where id = current_user_id;
 
   return new_org_id;
@@ -248,8 +470,10 @@ begin
   set organization_id = target_org_id,
       access_level = case
         when target_invite_type = 'summary_viewer' then 'summary_viewer'
-        else 'member'
-      end
+        when target_invite_type = 'admin' then 'admin'
+        else 'employee'
+      end,
+      reporting_manager_id = null
   where id = current_user_id;
 
   update public.organization_invitations
@@ -259,7 +483,8 @@ begin
   organization_id := target_org_id;
   access_level := case
     when target_invite_type = 'summary_viewer' then 'summary_viewer'
-    else 'member'
+    when target_invite_type = 'admin' then 'admin'
+    else 'employee'
   end;
   return next;
 end;
@@ -268,6 +493,7 @@ $$;
 alter table public.organizations enable row level security;
 alter table public.profiles enable row level security;
 alter table public.organization_invitations enable row level security;
+alter table public.employee_task_assigners enable row level security;
 alter table public.recurrence_rules enable row level security;
 alter table public.tasks enable row level security;
 alter table public.attendance_entries enable row level security;
@@ -282,11 +508,11 @@ create policy "authenticated users can create organizations"
 on public.organizations for insert
 with check (auth.uid() is not null and created_by = auth.uid());
 
-drop policy if exists "org members can update organization" on public.organizations;
-create policy "org members can update organization"
+drop policy if exists "admins can update organization" on public.organizations;
+create policy "admins can update organization"
 on public.organizations for update
-using (id = public.current_org_id())
-with check (id = public.current_org_id());
+using (id = public.current_org_id() and public.is_org_admin())
+with check (id = public.current_org_id() and public.is_org_admin());
 
 drop policy if exists "users can read profiles in own org" on public.profiles;
 create policy "users can read profiles in own org"
@@ -301,85 +527,113 @@ create policy "users can insert their own profile"
 on public.profiles for insert
 with check (id = auth.uid());
 
-drop policy if exists "users can update their own profile" on public.profiles;
-create policy "users can update their own profile"
+drop policy if exists "users can update profiles by policy" on public.profiles;
+create policy "users can update profiles by policy"
 on public.profiles for update
-using (id = auth.uid())
-with check (
+using (
   id = auth.uid()
-  and (
-    organization_id is null
-    or organization_id = public.current_org_id()
-    or public.current_org_id() is null
-  )
+  or (public.is_org_admin() and organization_id = public.current_org_id())
+)
+with check (
+  organization_id is null
+  or organization_id = public.current_org_id()
 );
 
-drop policy if exists "org members can read invitations" on public.organization_invitations;
-create policy "org members can read invitations"
+drop policy if exists "admins can read invitations" on public.organization_invitations;
+create policy "admins can read invitations"
 on public.organization_invitations for select
-using (organization_id = public.current_org_id());
+using (organization_id = public.current_org_id() and public.is_org_admin());
 
-drop policy if exists "org members can create invitations" on public.organization_invitations;
-create policy "org members can create invitations"
+drop policy if exists "admins can create invitations" on public.organization_invitations;
+create policy "admins can create invitations"
 on public.organization_invitations for insert
 with check (
   organization_id = public.current_org_id()
   and invited_by = auth.uid()
+  and public.is_org_admin()
 );
 
-drop policy if exists "org members can update invitations" on public.organization_invitations;
-create policy "org members can update invitations"
+drop policy if exists "admins can update invitations" on public.organization_invitations;
+create policy "admins can update invitations"
 on public.organization_invitations for update
-using (organization_id = public.current_org_id())
-with check (organization_id = public.current_org_id());
+using (organization_id = public.current_org_id() and public.is_org_admin())
+with check (organization_id = public.current_org_id() and public.is_org_admin());
+
+drop policy if exists "org members can read assigner links" on public.employee_task_assigners;
+create policy "org members can read assigner links"
+on public.employee_task_assigners for select
+using (organization_id = public.current_org_id());
+
+drop policy if exists "admins can create assigner links" on public.employee_task_assigners;
+create policy "admins can create assigner links"
+on public.employee_task_assigners for insert
+with check (organization_id = public.current_org_id() and public.is_org_admin());
+
+drop policy if exists "admins can delete assigner links" on public.employee_task_assigners;
+create policy "admins can delete assigner links"
+on public.employee_task_assigners for delete
+using (organization_id = public.current_org_id() and public.is_org_admin());
 
 drop policy if exists "org members can read recurrence rules" on public.recurrence_rules;
 create policy "org members can read recurrence rules"
 on public.recurrence_rules for select
 using (organization_id = public.current_org_id());
 
-drop policy if exists "org members can create recurrence rules" on public.recurrence_rules;
-create policy "org members can create recurrence rules"
+drop policy if exists "working members can create recurrence rules" on public.recurrence_rules;
+create policy "working members can create recurrence rules"
 on public.recurrence_rules for insert
 with check (
   organization_id = public.current_org_id()
   and created_by = auth.uid()
+  and public.current_access_level() <> 'summary_viewer'
+  and public.can_assign_employee(assigned_to)
 );
 
-drop policy if exists "org members can update recurrence rules" on public.recurrence_rules;
-create policy "org members can update recurrence rules"
+drop policy if exists "authorized users can update recurrence rules" on public.recurrence_rules;
+create policy "authorized users can update recurrence rules"
 on public.recurrence_rules for update
-using (organization_id = public.current_org_id())
-with check (organization_id = public.current_org_id());
+using (organization_id = public.current_org_id() and public.can_manage_recurrence_rule(id))
+with check (
+  organization_id = public.current_org_id()
+  and public.can_assign_employee(assigned_to)
+);
 
-drop policy if exists "org members can delete recurrence rules" on public.recurrence_rules;
-create policy "org members can delete recurrence rules"
+drop policy if exists "authorized users can delete recurrence rules" on public.recurrence_rules;
+create policy "authorized users can delete recurrence rules"
 on public.recurrence_rules for delete
-using (organization_id = public.current_org_id());
+using (organization_id = public.current_org_id() and public.can_manage_recurrence_rule(id));
 
 drop policy if exists "org members can read tasks" on public.tasks;
 create policy "org members can read tasks"
 on public.tasks for select
 using (organization_id = public.current_org_id());
 
-drop policy if exists "org members can create tasks" on public.tasks;
-create policy "org members can create tasks"
+drop policy if exists "working members can create tasks" on public.tasks;
+create policy "working members can create tasks"
 on public.tasks for insert
 with check (
   organization_id = public.current_org_id()
   and created_by = auth.uid()
+  and public.current_access_level() <> 'summary_viewer'
+  and public.can_assign_employee(assigned_to)
 );
 
-drop policy if exists "org members can update tasks" on public.tasks;
-create policy "org members can update tasks"
+drop policy if exists "authorized users can update tasks" on public.tasks;
+create policy "authorized users can update tasks"
 on public.tasks for update
-using (organization_id = public.current_org_id())
-with check (organization_id = public.current_org_id());
+using (
+  organization_id = public.current_org_id()
+  and (public.can_manage_task(id) or assigned_to = auth.uid())
+)
+with check (
+  organization_id = public.current_org_id()
+  and public.can_assign_employee(assigned_to)
+);
 
-drop policy if exists "org members can delete tasks" on public.tasks;
-create policy "org members can delete tasks"
+drop policy if exists "authorized users can delete tasks" on public.tasks;
+create policy "authorized users can delete tasks"
 on public.tasks for delete
-using (organization_id = public.current_org_id());
+using (organization_id = public.current_org_id() and public.can_manage_task(id));
 
 drop policy if exists "org members can read attendance" on public.attendance_entries;
 create policy "org members can read attendance"

@@ -8,14 +8,13 @@ type AppShellProps = {
   organizationName: string;
   overdueCount: number;
   userName: string;
-  accessLevel: "member" | "summary_viewer";
+  accessLevel: "admin" | "employee" | "summary_viewer";
 };
 
-const memberNavItems = [
+const workingNavItems = [
   { href: "/dashboard", label: "Dashboard" },
   { href: "/tasks", label: "Tasks" },
-  { href: "/team-summary", label: "Team Summary" },
-  { href: "/settings", label: "Settings" }
+  { href: "/team-summary", label: "Team Summary" }
 ];
 
 const viewerNavItems = [{ href: "/team-summary", label: "Team Summary" }];
@@ -28,7 +27,12 @@ export function AppShell({
   userName,
   accessLevel
 }: AppShellProps) {
-  const navItems = accessLevel === "summary_viewer" ? viewerNavItems : memberNavItems;
+  const navItems =
+    accessLevel === "summary_viewer"
+      ? viewerNavItems
+      : accessLevel === "admin"
+        ? [...workingNavItems, { href: "/settings", label: "Settings" }]
+        : workingNavItems;
 
   return (
     <div className="min-h-screen bg-[radial-gradient(circle_at_top_left,_rgba(98,226,155,0.10),_transparent_22%),linear-gradient(180deg,_#0a0f14_0%,_#0d131a_48%,_#090d12_100%)]">
@@ -44,14 +48,18 @@ export function AppShell({
           <div className="flex flex-col gap-3 md:items-end">
             <div className="flex flex-wrap items-center gap-2 text-sm text-ink/80">
               <span>{userName}</span>
-              {accessLevel === "summary_viewer" ? (
-                <span className="rounded-full border border-sand bg-[#131a22] px-2.5 py-1 text-xs font-medium text-white/70">
-                  Summary viewer
+              <span className="rounded-full border border-sand bg-[#131a22] px-2.5 py-1 text-xs font-medium text-white/70">
+                {accessLevel === "summary_viewer"
+                  ? "Summary viewer"
+                  : accessLevel === "admin"
+                    ? "Admin"
+                    : "Employee"}
+              </span>
+              {accessLevel !== "summary_viewer" ? (
+                <span className="rounded-full border border-pine/20 bg-pine/10 px-2.5 py-1 text-xs font-medium text-pine">
+                  {overdueCount} overdue
                 </span>
               ) : null}
-              <span className="rounded-full border border-pine/20 bg-pine/10 px-2.5 py-1 text-xs font-medium text-pine">
-                {overdueCount} overdue
-              </span>
             </div>
             <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
               <nav className="flex flex-wrap gap-2">

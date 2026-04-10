@@ -20,7 +20,7 @@ export async function ProtectedPage({ currentPath, children }: ProtectedPageProp
       organizationName={organization?.name ?? "Organization"}
       overdueCount={overdueCount}
       userName={profile.full_name || profile.email}
-      accessLevel={(profile.access_level ?? "member") as "member" | "summary_viewer"}
+      accessLevel={(profile.access_level ?? "employee") as "admin" | "employee" | "summary_viewer"}
     >
       {children}
     </AppShell>

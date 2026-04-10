@@ -13,8 +13,14 @@ import { ProtectedPage } from "@/components/protected-page";
 import { SubmitButton } from "@/components/submit-button";
 import { TaskStatusForm } from "@/components/task-status-form";
 import { TimeSelectField } from "@/components/time-select-field";
-import { requireMemberOrganizationProfile } from "@/lib/auth";
-import { getOrganizationMembers, getTasksPageData } from "@/lib/data";
+import { requireWorkingOrganizationProfile } from "@/lib/auth";
+import { getEmployeeTaskAssignerRecords, getOrganizationMembers, getTasksPageData } from "@/lib/data";
+import {
+  canManageRecurringRule,
+  canManageTask,
+  canToggleTask,
+  getAssignableMembers
+} from "@/lib/permissions";
 import { getRecurrencePreview } from "@/lib/recurrence";
 import { formatDateLabel, formatDateTimeLabel, formatTimeLabel, getTodayDateString } from "@/lib/utils";
 import type { TaskRecord } from "@/lib/types";
@@ -59,9 +65,10 @@ export default async function TasksPage({
     error?: string;
   };
 }) {
-  const profile = await requireMemberOrganizationProfile();
-  const [members, taskData] = await Promise.all([
+  const profile = await requireWorkingOrganizationProfile();
+  const [members, assignerLinks, taskData] = await Promise.all([
     getOrganizationMembers(profile.organization_id!),
+    getEmployeeTaskAssignerRecords(profile.organization_id!),
     getTasksPageData(profile.organization_id!, {
       assignedTo: searchParams.assignedTo,
       status: searchParams.status,
@@ -72,6 +79,8 @@ export default async function TasksPage({
       rangeEnd: searchParams.rangeEnd
     })
   ]);
+  const assignableMembers = getAssignableMembers(profile, members, assignerLinks);
+  const assignableMemberIds = new Set(assignableMembers.map((member) => member.id));
   const groupedTasks = groupTasksByDate(taskData.tasks);
   const selectedListRange = searchParams.listRange ?? "today";
   const today = getTodayDateString();
@@ -102,7 +111,7 @@ export default async function TasksPage({
                     <div>
                       <label className="mb-1.5 block text-sm font-medium text-ink">Assign to</label>
                       <select name="assignedTo" required defaultValue={profile.id}>
-                        {members.map((member) => (
+                        {assignableMembers.map((member) => (
                           <option key={member.id} value={member.id}>
                             {member.full_name || member.email}
                           </option>
@@ -141,7 +150,7 @@ export default async function TasksPage({
                     <div>
                       <label className="mb-1.5 block text-sm font-medium text-ink">Assign to</label>
                       <select name="assignedTo" required defaultValue={profile.id}>
-                        {members.map((member) => (
+                        {assignableMembers.map((member) => (
                           <option key={member.id} value={member.id}>
                             {member.full_name || member.email}
                           </option>
@@ -248,6 +257,7 @@ export default async function TasksPage({
                 ) : (
                   taskData.recurrenceRules.map((rule) => {
                     const assignedMember = members.find((member) => member.id === rule.assigned_to);
+                    const canDeleteRule = canManageRecurringRule(profile, rule, assignedMember);
                     return (
                       <div key={rule.id} className="rounded-2xl border border-sand/90 bg-[#131a22] px-4 py-3">
                         <div className="flex items-start justify-between gap-3">
@@ -262,25 +272,27 @@ export default async function TasksPage({
                             {rule.frequency}
                           </span>
                         </div>
-                        <form action={deleteRecurringTaskAction} className="mt-3">
-                          <input type="hidden" name="recurrenceRuleId" value={rule.id} />
-                          <div className="flex flex-wrap gap-2">
-                            <ConfirmButton
-                              message="Delete this recurring rule? Future generated tasks linked to it will also be removed."
-                              className="rounded-2xl border border-rose/20 bg-rose/10 px-4 py-2 text-sm font-medium text-rose hover:bg-rose/15"
-                            >
-                              Delete rule
-                            </ConfirmButton>
-                            <ConfirmButton
-                              name="deleteMode"
-                              value="all"
-                              message="Delete this recurring rule and all generated tasks, including past instances?"
-                              className="rounded-2xl border border-rose/30 bg-rose/15 px-4 py-2 text-sm font-medium text-rose hover:bg-rose/20"
-                            >
-                              Delete rule and all generated tasks
-                            </ConfirmButton>
-                          </div>
-                        </form>
+                        {canDeleteRule ? (
+                          <form action={deleteRecurringTaskAction} className="mt-3">
+                            <input type="hidden" name="recurrenceRuleId" value={rule.id} />
+                            <div className="flex flex-wrap gap-2">
+                              <ConfirmButton
+                                message="Delete this recurring rule? Future generated tasks linked to it will also be removed."
+                                className="rounded-2xl border border-rose/20 bg-rose/10 px-4 py-2 text-sm font-medium text-rose hover:bg-rose/15"
+                              >
+                                Delete rule
+                              </ConfirmButton>
+                              <ConfirmButton
+                                name="deleteMode"
+                                value="all"
+                                message="Delete this recurring rule and all generated tasks, including past instances?"
+                                className="rounded-2xl border border-rose/30 bg-rose/15 px-4 py-2 text-sm font-medium text-rose hover:bg-rose/20"
+                              >
+                                Delete rule and all generated tasks
+                              </ConfirmButton>
+                            </div>
+                          </form>
+                        ) : null}
                       </div>
                     );
                   })
@@ -406,76 +418,152 @@ export default async function TasksPage({
                             <span>Delete</span>
                           </div>
 
-                          {tasks.map((task) => (
-                            <div
-                              key={task.id}
-                              className="grid grid-cols-[52px_2.2fr_1.2fr_140px_140px_120px_110px] gap-3 border-b border-sand/70 px-4 py-3 last:border-b-0"
-                            >
-                              <div className="flex items-start pt-2">
-                                <TaskStatusForm taskId={task.id} checked={task.status === "completed"} />
-                              </div>
+                          {tasks.map((task) => {
+                            const assignedMember = members.find((member) => member.id === task.assigned_to);
+                            const canEditTask = canManageTask(profile, task, assignedMember);
+                            const canDeleteTask = canEditTask;
+                            const canToggle = canToggleTask(profile, task, assignedMember);
+                            const canReassignTask = canEditTask;
+                            const availableAssignees =
+                              assignedMember && !assignableMemberIds.has(task.assigned_to)
+                                ? [assignedMember, ...assignableMembers]
+                                : assignableMembers;
 
-                              <form action={updateTaskAction} className="contents">
-                                <input type="hidden" name="taskId" value={task.id} />
-
-                                <div className="space-y-2">
-                                  <input name="title" defaultValue={task.title} required />
-                                  <input
-                                    name="description"
-                                    defaultValue={task.description ?? ""}
-                                    placeholder="Optional description"
-                                  />
-                                  <p className="text-xs text-white/45">
-                                    Created by {task.created_profile?.full_name || task.created_profile?.email}
-                                    {" · "}
-                                    Completed {formatDateTimeLabel(task.completed_at)}
-                                  </p>
-                                </div>
-
-                                <div className="space-y-2">
-                                  <select name="assignedTo" defaultValue={task.assigned_to} required>
-                                    {members.map((member) => (
-                                      <option key={member.id} value={member.id}>
-                                        {member.full_name || member.email}
-                                      </option>
-                                    ))}
-                                  </select>
-                                  <input name="dueDate" type="date" defaultValue={task.due_date} required />
-                                </div>
-
-                                <div className="space-y-2">
-                                  <TimeSelectField name="dueTime" defaultValue={task.due_time ?? ""} />
-                                  <p className="text-xs text-white/45">{formatTimeLabel(task.due_time)}</p>
-                                </div>
-
+                            return (
+                              <div
+                                key={task.id}
+                                className="grid grid-cols-[52px_2.2fr_1.2fr_140px_140px_120px_110px] gap-3 border-b border-sand/70 px-4 py-3 last:border-b-0"
+                              >
                                 <div className="flex items-start pt-2">
-                                  <span
-                                    className={`rounded-full px-2.5 py-1 text-xs font-medium ${
-                                      task.status === "completed"
-                                        ? "border border-pine/20 bg-pine/10 text-pine"
-                                        : "border border-amber/20 bg-amber/10 text-amber"
-                                    }`}
-                                  >
-                                    {task.status}
-                                  </span>
+                                  <TaskStatusForm
+                                    taskId={task.id}
+                                    checked={task.status === "completed"}
+                                    disabled={!canToggle}
+                                  />
                                 </div>
+
+                                {canEditTask ? (
+                                  <form action={updateTaskAction} className="contents">
+                                    <input type="hidden" name="taskId" value={task.id} />
+
+                                    <div className="space-y-2">
+                                      <input name="title" defaultValue={task.title} required />
+                                      <input
+                                        name="description"
+                                        defaultValue={task.description ?? ""}
+                                        placeholder="Optional description"
+                                      />
+                                      <p className="text-xs text-white/45">
+                                        Created by {task.created_profile?.full_name || task.created_profile?.email}
+                                        {" · "}
+                                        Completed {formatDateTimeLabel(task.completed_at)}
+                                      </p>
+                                    </div>
+
+                                    <div className="space-y-2">
+                                      <select
+                                        name="assignedTo"
+                                        defaultValue={task.assigned_to}
+                                        required
+                                        disabled={!canReassignTask}
+                                      >
+                                        {(canReassignTask ? availableAssignees : [assignedMember].filter(Boolean)).map((member) => (
+                                          <option key={member!.id} value={member!.id}>
+                                            {member!.full_name || member!.email}
+                                          </option>
+                                        ))}
+                                      </select>
+                                      <input name="dueDate" type="date" defaultValue={task.due_date} required />
+                                    </div>
+
+                                    <div className="space-y-2">
+                                      <TimeSelectField name="dueTime" defaultValue={task.due_time ?? ""} />
+                                      <p className="text-xs text-white/45">{formatTimeLabel(task.due_time)}</p>
+                                    </div>
+
+                                    <div className="flex items-start pt-2">
+                                      <span
+                                        className={`rounded-full px-2.5 py-1 text-xs font-medium ${
+                                          task.status === "completed"
+                                            ? "border border-pine/20 bg-pine/10 text-pine"
+                                            : "border border-amber/20 bg-amber/10 text-amber"
+                                        }`}
+                                      >
+                                        {task.status}
+                                      </span>
+                                    </div>
+
+                                    <div className="flex items-start pt-1">
+                                      <SubmitButton className="w-full">Save</SubmitButton>
+                                    </div>
+                                  </form>
+                                ) : (
+                                  <>
+                                    <div className="space-y-2">
+                                      <p className="rounded-2xl border border-sand bg-[#0d131a] px-4 py-3 text-sm text-white">
+                                        {task.title}
+                                      </p>
+                                      <p className="rounded-2xl border border-sand bg-[#0d131a] px-4 py-3 text-sm text-white/65">
+                                        {task.description || "No description"}
+                                      </p>
+                                      <p className="text-xs text-white/45">
+                                        Created by {task.created_profile?.full_name || task.created_profile?.email}
+                                        {" · "}
+                                        Completed {formatDateTimeLabel(task.completed_at)}
+                                      </p>
+                                    </div>
+                                    <div className="space-y-2">
+                                      <p className="rounded-2xl border border-sand bg-[#0d131a] px-4 py-3 text-sm text-white">
+                                        {assignedMember?.full_name || assignedMember?.email || "Unknown"}
+                                      </p>
+                                      <p className="rounded-2xl border border-sand bg-[#0d131a] px-4 py-3 text-sm text-white">
+                                        {formatDateLabel(task.due_date)}
+                                      </p>
+                                    </div>
+                                    <div className="space-y-2">
+                                      <p className="rounded-2xl border border-sand bg-[#0d131a] px-4 py-3 text-sm text-white">
+                                        {formatTimeLabel(task.due_time)}
+                                      </p>
+                                    </div>
+                                    <div className="flex items-start pt-2">
+                                      <span
+                                        className={`rounded-full px-2.5 py-1 text-xs font-medium ${
+                                          task.status === "completed"
+                                            ? "border border-pine/20 bg-pine/10 text-pine"
+                                            : "border border-amber/20 bg-amber/10 text-amber"
+                                        }`}
+                                      >
+                                        {task.status}
+                                      </span>
+                                    </div>
+                                    <div className="flex items-start pt-1">
+                                      <span className="w-full rounded-2xl border border-sand bg-[#0d131a] px-4 py-2 text-center text-sm text-white/40">
+                                        Locked
+                                      </span>
+                                    </div>
+                                  </>
+                                )}
 
                                 <div className="flex items-start pt-1">
-                                  <SubmitButton className="w-full">Save</SubmitButton>
+                                  {canDeleteTask ? (
+                                    <form action={deleteTaskAction} className="w-full">
+                                      <input type="hidden" name="taskId" value={task.id} />
+                                      <ConfirmButton
+                                        message="Delete this task?"
+                                        className="w-full rounded-2xl border border-rose/20 bg-rose/10 px-4 py-2 text-sm font-medium text-rose hover:bg-rose/15"
+                                      >
+                                        Delete
+                                      </ConfirmButton>
+                                    </form>
+                                  ) : (
+                                    <span className="w-full rounded-2xl border border-sand bg-[#0d131a] px-4 py-2 text-center text-sm text-white/40">
+                                      Locked
+                                    </span>
+                                  )}
                                 </div>
-                              </form>
-
-                              <form action={deleteTaskAction} className="flex items-start pt-1">
-                                <input type="hidden" name="taskId" value={task.id} />
-                                <ConfirmButton
-                                  message="Delete this task?"
-                                  className="w-full rounded-2xl border border-rose/20 bg-rose/10 px-4 py-2 text-sm font-medium text-rose hover:bg-rose/15"
-                                >
-                                  Delete
-                                </ConfirmButton>
-                              </form>
-                            </div>
-                          ))}
+                              </div>
+                            );
+                          })}
                         </div>
                       </div>
                     </div>

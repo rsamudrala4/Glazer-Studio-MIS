@@ -15,7 +15,7 @@ export default async function LoginPage({
   if (user) {
     const profile = await getCurrentProfile();
     if (!profile?.organization_id) redirect("/settings?setup=organization");
-    if ((profile.access_level ?? "member") === "summary_viewer") redirect("/team-summary");
+    if ((profile.access_level ?? "employee") === "summary_viewer") redirect("/team-summary");
     redirect("/dashboard");
   }
   const supabaseConfig = getSupabaseConfigStatus();

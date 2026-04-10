@@ -16,7 +16,7 @@ export default async function SignupPage({
   if (user) {
     const profile = await getCurrentProfile();
     if (!profile?.organization_id) redirect("/settings?setup=organization");
-    if ((profile.access_level ?? "member") === "summary_viewer") redirect("/team-summary");
+    if ((profile.access_level ?? "employee") === "summary_viewer") redirect("/team-summary");
     redirect("/dashboard");
   }
 
@@ -33,6 +33,8 @@ export default async function SignupPage({
           organizationName
             ? invitation?.invite_type === "summary_viewer"
               ? `Join ${organizationName} with summary-only access.`
+              : invitation?.invite_type === "admin"
+                ? `Join ${organizationName} with admin access.`
               : `Join ${organizationName} and start collaborating on tasks.`
             : "Create the first account and set up your organization."
         }

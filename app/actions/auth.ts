@@ -27,7 +27,7 @@ async function redirectToHomeForCurrentUser() {
     redirect("/settings?setup=organization");
   }
 
-  if ((profile.access_level ?? "member") === "summary_viewer") {
+  if ((profile.access_level ?? "employee") === "summary_viewer") {
     redirect("/team-summary");
   }
 
@@ -120,7 +120,7 @@ export async function signupAction(formData: FormData) {
     }
 
     let organizationId = invitation?.organization_id ?? null;
-    let accessLevel: "member" | "summary_viewer" = "member";
+    let accessLevel: "admin" | "employee" | "summary_viewer" = "employee";
 
     if (invitation) {
       const { data: acceptedInvitation, error: acceptInvitationError } = await supabase.rpc(
@@ -147,7 +147,7 @@ export async function signupAction(formData: FormData) {
       }
 
       organizationId = acceptedOrgId;
-      accessLevel = (acceptedAccessLevel ?? "member") as "member" | "summary_viewer";
+      accessLevel = (acceptedAccessLevel ?? "employee") as "admin" | "employee" | "summary_viewer";
     } else {
       const { data: createdOrganizationId, error: organizationError } = await supabase.rpc(
         "create_organization_for_current_user",
@@ -164,6 +164,7 @@ export async function signupAction(formData: FormData) {
       }
 
       organizationId = createdOrganizationId;
+      accessLevel = "admin";
     }
 
     const { error: profileError } = await supabase

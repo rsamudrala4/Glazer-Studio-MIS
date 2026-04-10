@@ -1,9 +1,11 @@
 import { addDays, subDays } from "date-fns";
+import { cache } from "react";
 import { isMissingColumnError } from "@/lib/db-compat";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { getGenerationWindow, generateOccurrenceDates } from "@/lib/recurrence";
 import type {
   AttendanceEntryRecord,
+  EmployeeTaskAssignerRecord,
   InvitationRecord,
   OrganizationRecord,
   ProfileRecord,
@@ -22,12 +24,12 @@ function normalizeTask(task: TaskRow): TaskRecord {
   };
 }
 
-export async function getOrganizationContext(userId: string) {
+export const getOrganizationContext = cache(async (userId: string) => {
   const supabase = createSupabaseServerClient();
 
   const { data: profile, error: profileError } = await supabase
     .from("profiles")
-    .select("id, organization_id, full_name, email, access_level, created_at")
+    .select("id, organization_id, full_name, email, access_level, reporting_manager_id, created_at")
     .eq("id", userId)
     .single();
 
@@ -36,14 +38,14 @@ export async function getOrganizationContext(userId: string) {
   if (profileError && isMissingColumnError(profileError, "profiles.access_level")) {
     const { data: fallbackProfile, error: fallbackProfileError } = await supabase
       .from("profiles")
-      .select("id, organization_id, full_name, email, created_at")
+      .select("id, organization_id, full_name, email, reporting_manager_id, created_at")
       .eq("id", userId)
       .single();
 
     if (fallbackProfileError) throw fallbackProfileError;
     resolvedProfile = {
       ...(fallbackProfile as ProfileRecord),
-      access_level: "member"
+      access_level: "employee" as const
     };
   } else if (profileError) {
     throw profileError;
@@ -65,7 +67,7 @@ export async function getOrganizationContext(userId: string) {
     profile: resolvedProfile as ProfileRecord,
     organization: organization as OrganizationRecord
   };
-}
+});
 
 export async function getOrganizationMembers(
   organizationId: string,
@@ -74,21 +76,21 @@ export async function getOrganizationMembers(
   const supabase = createSupabaseServerClient();
   const { data, error } = await supabase
     .from("profiles")
-    .select("id, organization_id, full_name, email, access_level, created_at")
+    .select("id, organization_id, full_name, email, access_level, reporting_manager_id, created_at")
     .eq("organization_id", organizationId)
     .order("full_name", { ascending: true });
 
   if (error && isMissingColumnError(error, "profiles.access_level")) {
     const { data: fallbackData, error: fallbackError } = await supabase
       .from("profiles")
-      .select("id, organization_id, full_name, email, created_at")
+      .select("id, organization_id, full_name, email, reporting_manager_id, created_at")
       .eq("organization_id", organizationId)
       .order("full_name", { ascending: true });
 
     if (fallbackError) throw fallbackError;
     return ((fallbackData ?? []) as ProfileRecord[]).map((member) => ({
       ...member,
-      access_level: "member"
+      access_level: "employee" as const
     }));
   }
 
@@ -99,7 +101,7 @@ export async function getOrganizationMembers(
     return members;
   }
 
-  return members.filter((member) => (member.access_level ?? "member") === "member");
+  return members.filter((member) => (member.access_level ?? "employee") !== "summary_viewer");
 }
 
 export async function getActiveInvitations(organizationId: string) {
@@ -124,7 +126,7 @@ export async function getActiveInvitations(organizationId: string) {
     if (fallbackError) throw fallbackError;
     return ((fallbackData ?? []) as InvitationRecord[]).map((invite) => ({
       ...invite,
-      invite_type: "member"
+      invite_type: "employee" as const
     }));
   }
 
@@ -161,7 +163,7 @@ export async function getInvitationByToken(token: string) {
 
     return {
       ...fallbackData,
-      invite_type: "member" as const,
+      invite_type: "employee" as const,
       organization_name: organization?.name ?? null
     };
   }
@@ -226,6 +228,17 @@ export async function ensureRecurringTasksForOrganization(organizationId: string
   }
 }
 
+export async function getEmployeeTaskAssignerRecords(organizationId: string) {
+  const supabase = createSupabaseServerClient();
+  const { data, error } = await supabase
+    .from("employee_task_assigners")
+    .select("organization_id, employee_id, assigner_id")
+    .eq("organization_id", organizationId);
+
+  if (error) throw error;
+  return (data ?? []) as EmployeeTaskAssignerRecord[];
+}
+
 export async function getDashboardData(userId: string, organizationId: string) {
   await ensureRecurringTasksForOrganization(organizationId);
 
@@ -244,7 +257,7 @@ export async function getDashboardData(userId: string, organizationId: string) {
       supabase
         .from("tasks")
         .select(
-          "id, organization_id, title, description, assigned_to, created_by, due_date, due_time, status, completed_at, created_at, recurrence_rule_id, recurrence_instance_date, assigned_profile:profiles!tasks_assigned_to_fkey(full_name, email)"
+          "id, organization_id, title, description, assigned_to, created_by, due_date, due_time, status, completed_at, created_at, recurrence_rule_id, recurrence_instance_date, assigned_profile:profiles!tasks_assigned_to_fkey(full_name, email, reporting_manager_id, access_level)"
         )
         .eq("assigned_to", userId)
         .eq("due_date", today)
@@ -252,7 +265,7 @@ export async function getDashboardData(userId: string, organizationId: string) {
       supabase
         .from("tasks")
         .select(
-          "id, organization_id, title, description, assigned_to, created_by, due_date, due_time, status, completed_at, created_at, recurrence_rule_id, recurrence_instance_date, assigned_profile:profiles!tasks_assigned_to_fkey(full_name, email)"
+          "id, organization_id, title, description, assigned_to, created_by, due_date, due_time, status, completed_at, created_at, recurrence_rule_id, recurrence_instance_date, assigned_profile:profiles!tasks_assigned_to_fkey(full_name, email, reporting_manager_id, access_level)"
         )
         .eq("assigned_to", userId)
         .eq("status", "pending")
@@ -261,7 +274,7 @@ export async function getDashboardData(userId: string, organizationId: string) {
       supabase
         .from("tasks")
         .select(
-          "id, organization_id, title, description, assigned_to, created_by, due_date, due_time, status, completed_at, created_at, recurrence_rule_id, recurrence_instance_date, assigned_profile:profiles!tasks_assigned_to_fkey(full_name, email)"
+          "id, organization_id, title, description, assigned_to, created_by, due_date, due_time, status, completed_at, created_at, recurrence_rule_id, recurrence_instance_date, assigned_profile:profiles!tasks_assigned_to_fkey(full_name, email, reporting_manager_id, access_level)"
         )
         .eq("assigned_to", userId)
         .gte("due_date", getDateStringInTimeZone(addDays(now, 1)))
@@ -313,7 +326,7 @@ export async function getTasksPageData(organizationId: string, filters: {
   let query = supabase
     .from("tasks")
     .select(
-      "id, organization_id, title, description, assigned_to, created_by, due_date, due_time, status, completed_at, created_at, recurrence_rule_id, recurrence_instance_date, assigned_profile:profiles!tasks_assigned_to_fkey(full_name, email), created_profile:profiles!tasks_created_by_fkey(full_name, email)"
+      "id, organization_id, title, description, assigned_to, created_by, due_date, due_time, status, completed_at, created_at, recurrence_rule_id, recurrence_instance_date, assigned_profile:profiles!tasks_assigned_to_fkey(full_name, email, reporting_manager_id, access_level), created_profile:profiles!tasks_created_by_fkey(full_name, email, reporting_manager_id, access_level)"
     )
     .eq("organization_id", organizationId)
     .order("due_date", { ascending: true })
@@ -395,13 +408,13 @@ export async function getTeamSummaryData(organizationId: string, date: string) {
     await Promise.all([
       supabase
         .from("profiles")
-        .select("id, organization_id, full_name, email, access_level, created_at")
+        .select("id, organization_id, full_name, email, access_level, reporting_manager_id, created_at")
         .eq("organization_id", organizationId)
         .order("full_name", { ascending: true }),
       supabase
         .from("tasks")
         .select(
-          "id, organization_id, title, description, assigned_to, created_by, due_date, due_time, status, completed_at, created_at, recurrence_rule_id, recurrence_instance_date, assigned_profile:profiles!tasks_assigned_to_fkey(full_name, email)"
+          "id, organization_id, title, description, assigned_to, created_by, due_date, due_time, status, completed_at, created_at, recurrence_rule_id, recurrence_instance_date, assigned_profile:profiles!tasks_assigned_to_fkey(full_name, email, reporting_manager_id, access_level)"
         )
         .eq("organization_id", organizationId)
         .eq("due_date", date)
@@ -425,14 +438,14 @@ export async function getTeamSummaryData(organizationId: string, date: string) {
   if (membersError && isMissingColumnError(membersError, "profiles.access_level")) {
     const { data: fallbackMembers, error: fallbackMembersError } = await supabase
       .from("profiles")
-      .select("id, organization_id, full_name, email, created_at")
+      .select("id, organization_id, full_name, email, reporting_manager_id, created_at")
       .eq("organization_id", organizationId)
       .order("full_name", { ascending: true });
 
     if (fallbackMembersError) throw fallbackMembersError;
     resolvedMembers = ((fallbackMembers ?? []) as ProfileRecord[]).map((member) => ({
       ...member,
-      access_level: "member"
+      access_level: "employee" as const
     }));
   } else if (membersError) {
     throw membersError;
@@ -447,7 +460,7 @@ export async function getTeamSummaryData(organizationId: string, date: string) {
   const monthlyAttendanceList = (monthlyAttendanceEntries ?? []) as AttendanceEntryRecord[];
 
   const workingMembers = resolvedMembers.filter(
-    (member) => (member.access_level ?? "member") === "member"
+    (member) => (member.access_level ?? "employee") !== "summary_viewer"
   );
 
   const summaries = workingMembers.map((member) => {
@@ -493,16 +506,16 @@ export async function getTeamSummaryData(organizationId: string, date: string) {
   return { summaries, textSummary };
 }
 
-export async function getOverdueCount(userId: string) {
+export const getOverdueCount = cache(async (userId: string) => {
   const supabase = createSupabaseServerClient();
   const today = getDateStringInTimeZone(new Date());
   const { count, error } = await supabase
     .from("tasks")
-    .select("*", { count: "exact", head: true })
+    .select("id", { count: "planned", head: true })
     .eq("assigned_to", userId)
     .eq("status", "pending")
     .lt("due_date", today);
 
   if (error) throw error;
   return count ?? 0;
-}
+});

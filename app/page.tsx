@@ -14,7 +14,7 @@ export default async function HomePage() {
     redirect("/settings?setup=organization");
   }
 
-  if ((profile.access_level ?? "member") === "summary_viewer") {
+  if ((profile.access_level ?? "employee") === "summary_viewer") {
     redirect("/team-summary");
   }
 

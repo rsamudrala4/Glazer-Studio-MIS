@@ -1,3 +1,5 @@
+export type AccessLevel = "admin" | "employee" | "summary_viewer";
+
 export type TaskStatus = "pending" | "completed";
 
 export type TaskRecord = {
@@ -17,16 +19,30 @@ export type TaskRecord = {
   assigned_profile?: {
     full_name: string | null;
     email: string;
+    reporting_manager_id?: string | null;
+    access_level?: AccessLevel;
   } | null;
   created_profile?: {
     full_name: string | null;
     email: string;
+    reporting_manager_id?: string | null;
+    access_level?: AccessLevel;
   } | null;
 };
 
 export type TaskRow = Omit<TaskRecord, "assigned_profile" | "created_profile"> & {
-  assigned_profile?: { full_name: string | null; email: string }[] | null;
-  created_profile?: { full_name: string | null; email: string }[] | null;
+  assigned_profile?: {
+    full_name: string | null;
+    email: string;
+    reporting_manager_id?: string | null;
+    access_level?: AccessLevel;
+  }[] | null;
+  created_profile?: {
+    full_name: string | null;
+    email: string;
+    reporting_manager_id?: string | null;
+    access_level?: AccessLevel;
+  }[] | null;
 };
 
 export type ProfileRecord = {
@@ -34,7 +50,8 @@ export type ProfileRecord = {
   organization_id: string | null;
   full_name: string | null;
   email: string;
-  access_level?: "member" | "summary_viewer";
+  access_level?: AccessLevel;
+  reporting_manager_id?: string | null;
   created_at: string;
 };
 
@@ -50,7 +67,7 @@ export type InvitationRecord = {
   organization_id: string;
   email: string;
   token: string;
-  invite_type?: "member" | "summary_viewer";
+  invite_type?: AccessLevel;
   accepted_at: string | null;
   expires_at: string;
   created_at: string;
@@ -80,4 +97,10 @@ export type RecurrenceRuleRecord = {
   interval_value: number;
   weekdays: number[] | null;
   is_active: boolean;
+};
+
+export type EmployeeTaskAssignerRecord = {
+  organization_id: string;
+  employee_id: string;
+  assigner_id: string;
 };

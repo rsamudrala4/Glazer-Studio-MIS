@@ -16,7 +16,7 @@ async function ensureProfileRecord() {
 
   const { data: existingProfile, error: existingProfileError } = await supabase
     .from("profiles")
-    .select("id, organization_id, full_name, email, access_level, created_at")
+    .select("id, organization_id, full_name, email, access_level, reporting_manager_id, created_at")
     .eq("id", user.id)
     .maybeSingle();
 
@@ -27,7 +27,7 @@ async function ensureProfileRecord() {
   if (isMissingColumnError(existingProfileError, "profiles.access_level")) {
     const { data: fallbackProfile, error: fallbackProfileError } = await supabase
       .from("profiles")
-      .select("id, organization_id, full_name, email, created_at")
+      .select("id, organization_id, full_name, email, reporting_manager_id, created_at")
       .eq("id", user.id)
       .maybeSingle();
 
@@ -38,7 +38,7 @@ async function ensureProfileRecord() {
     if (fallbackProfile) {
       return {
         ...fallbackProfile,
-        access_level: "member" as const
+        access_level: "employee" as const
       };
     }
   }
@@ -63,7 +63,7 @@ async function ensureProfileRecord() {
 
   const { data: createdProfile, error: createdProfileError } = await supabase
     .from("profiles")
-    .select("id, organization_id, full_name, email, access_level, created_at")
+    .select("id, organization_id, full_name, email, access_level, reporting_manager_id, created_at")
     .eq("id", user.id)
     .maybeSingle();
 
@@ -74,7 +74,7 @@ async function ensureProfileRecord() {
   if (isMissingColumnError(createdProfileError, "profiles.access_level")) {
     const { data: fallbackCreatedProfile, error: fallbackCreatedProfileError } = await supabase
       .from("profiles")
-      .select("id, organization_id, full_name, email, created_at")
+      .select("id, organization_id, full_name, email, reporting_manager_id, created_at")
       .eq("id", user.id)
       .maybeSingle();
 
@@ -85,7 +85,7 @@ async function ensureProfileRecord() {
     return fallbackCreatedProfile
       ? {
           ...fallbackCreatedProfile,
-          access_level: "member" as const
+          access_level: "employee" as const
         }
       : null;
   }
@@ -153,8 +153,23 @@ export async function requireOrganizationProfile() {
 
 export async function requireMemberOrganizationProfile() {
   const profile = await requireOrganizationProfile();
-  if ((profile.access_level ?? "member") !== "member") {
+  if ((profile.access_level ?? "employee") === "summary_viewer") {
     redirect("/team-summary");
+  }
+  return profile;
+}
+
+export async function requireWorkingOrganizationProfile() {
+  return requireMemberOrganizationProfile();
+}
+
+export async function requireAdminOrganizationProfile() {
+  const profile = await requireOrganizationProfile();
+  if ((profile.access_level ?? "employee") === "summary_viewer") {
+    redirect("/team-summary");
+  }
+  if ((profile.access_level ?? "employee") !== "admin") {
+    redirect("/dashboard");
   }
   return profile;
 }
